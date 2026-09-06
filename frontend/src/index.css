@@ -1,0 +1,9 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { height: 100%; }
+body { background: #08090d; color: #fff; font-family: 'Inter', system-ui, sans-serif; }
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #1e2035; border-radius: 4px; }
+select option { background: #13141f; color: #fff; }
+input::placeholder { color: #333; }
+button:focus { outline: none; }

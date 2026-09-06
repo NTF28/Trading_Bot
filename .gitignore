@@ -1,0 +1,16 @@
+# Credentials - never commit these
+backend/.env
+backend/models/xgb_model.pkl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
+Thumbs.db

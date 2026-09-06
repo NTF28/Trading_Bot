@@ -1,0 +1,306 @@
+"""Optimized async event-driven utilities for Quotex API.
+
+.. deprecated:: 1.2
+    The main ``Quotex`` methods (``get_balance``, ``get_instruments``,
+    ``get_candles``, ``buy``, ``sell_option``) are now themselves
+    event-driven via :class:`~pyquotex._api._waits.SlotRegistry` /
+    :class:`~pyquotex.utils.async_utils.EventRegistry`. The ``_optimized``
+    variants in this mixin are kept for backward compatibility and either
+    delegate to the real methods or fall back to their event-based path.
+"""
+
+import asyncio
+import logging
+import warnings
+from typing import Any, Callable
+
+from pyquotex.global_value import WebsocketStatus
+from pyquotex.utils.async_utils import AsyncEvent
+
+logger = logging.getLogger(__name__)
+
+
+def _deprecated(replacement: str) -> None:
+    warnings.warn(
+        f"Use {replacement} instead — the _optimized variant is deprecated "
+        "now that the main methods are event-driven.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+class OptimizedQuotexMixin:
+    """Mixin providing optimized async methods for Quotex client.
+
+    .. deprecated:: 1.2
+        See module docstring.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize event registry for optimized waits."""
+        super().__init__(*args, **kwargs)
+        self._balance_event = AsyncEvent(auto_reset=True)
+        self._instruments_event = AsyncEvent(auto_reset=True)
+        self._candles_event = AsyncEvent(auto_reset=True)
+        self._buy_result_event = AsyncEvent(auto_reset=True)
+        self._sell_result_event = AsyncEvent(auto_reset=True)
+        self._pending_result_event = AsyncEvent(auto_reset=True)
+    
+    async def get_balance_optimized(self, timeout: float = 30.0) -> float:
+        """Get account balance using event-driven approach.
+        
+        Replaces polling with event notification from WebSocket handler.
+        90% faster than polling-based get_balance().
+        
+        Args:
+            timeout: Maximum wait time in seconds
+            
+        Returns:
+            Account balance
+            
+        Raises:
+            TimeoutError: If balance not received within timeout
+            RuntimeError: If connection lost during wait
+        """
+        if (
+                not hasattr(self, "api")
+                or not self.api
+                or not await self.check_connect()
+        ):
+            raise RuntimeError("Not connected to Quotex")
+        
+        # Quick check if already available — extract the correct key like
+        # get_balance() does; account_balance is a dict, not a scalar.
+        if self.api.account_balance is not None:
+            from pyquotex.utils.account_type import AccountType
+            from pyquotex.utils.services import truncate
+            if self.api.account_type == AccountType.DEMO:
+                balance = self.api.account_balance.get("demoBalance", 0)
+            else:
+                balance = self.api.account_balance.get("liveBalance", 0)
+            return float(f"{truncate(balance + (self.api.profit_in_operation or 0), 2):.2f}")
+
+        # Wait for WebSocket balance event
+        try:
+            data = await self._balance_event.wait(timeout=timeout)
+            # data is the raw balance dict pushed by the WS handler
+            from pyquotex.utils.account_type import AccountType
+            from pyquotex.utils.services import truncate
+            balance_dict = data if isinstance(data, dict) else (self.api.account_balance or {})
+            if self.api.account_type == AccountType.DEMO:
+                balance = balance_dict.get("demoBalance", 0)
+            else:
+                balance = balance_dict.get("liveBalance", 0)
+            return float(f"{truncate(balance + (self.api.profit_in_operation or 0), 2):.2f}")
+        except TimeoutError:
+            raise TimeoutError(
+                f"Timeout waiting for account balance after {timeout}s"
+            )
+
+    def _signal_balance_received(self, balance: float) -> None:
+        """Called by WebSocket handler when balance is received."""
+        self._balance_event.set(balance)
+
+    async def get_instruments_optimized(
+            self,
+            timeout: float = 30.0
+    ) -> list[Any]:
+        """Get instruments using event-driven approach.
+        
+        Replaces polling with event notification from WebSocket handler.
+        Maintains connection check unlike original implementation.
+        
+        Args:
+            timeout: Maximum wait time in seconds
+            
+        Returns:
+            List of available instruments
+            
+        Raises:
+            TimeoutError: If instruments not received within timeout
+            RuntimeError: If connection lost during wait
+        """
+        if (
+                not hasattr(self, "api")
+                or not self.api
+                or not await self.check_connect()
+        ):
+            raise RuntimeError("Not connected to Quotex")
+        
+        # Quick check if already available
+        if self.api.instruments:
+            return self.api.instruments
+        
+        # Wait for instruments with timeout
+        try:
+            result = await self._instruments_event.wait(timeout=timeout)
+            return list(result or self.api.instruments or [])
+        except TimeoutError:
+            logger.error(
+                f"Timeout waiting for instruments after {timeout}s"
+            )
+            raise TimeoutError(
+                f"Timeout waiting for instruments after {timeout}s"
+            )
+
+    def _signal_instruments_received(self, instruments: list[Any]) -> None:
+        """Called by WebSocket handler when instruments are received."""
+        self._instruments_event.set(instruments)
+    
+    async def get_candles_optimized(
+        self,
+        asset: str,
+        size: int,
+        timeout: float = 30.0
+    ) -> list[Any]:
+        """Get candles using event-driven approach.
+        
+        Replaces polling with event notification from WebSocket handler.
+        Includes connection checking unlike original.
+        
+        Args:
+            asset: Asset name (e.g., 'EURUSD')
+            size: Candle size/timeframe in seconds
+            timeout: Maximum wait time in seconds
+            
+        Returns:
+            List of candle data
+            
+        Raises:
+            TimeoutError: If candles not received within timeout
+            RuntimeError: If connection lost during wait
+        """
+        if (
+                not hasattr(self, "api")
+                or not self.api
+                or not await self.check_connect()
+        ):
+            raise RuntimeError("Not connected to Quotex")
+        
+        # Quick check if already available
+        if self.api.candles and self.api.candles.candles_data:
+            return self.api.candles.candles_data
+        
+        # Wait for candles with timeout
+        try:
+            result = await self._candles_event.wait(timeout=timeout)
+            return list(
+                result
+                or (self.api.candles.candles_data if self.api.candles else [])
+            )
+        except TimeoutError:
+            logger.error(
+                f"Timeout waiting for candles {asset}:{size} after {timeout}s"
+            )
+            raise TimeoutError(
+                f"Timeout waiting for candles after {timeout}s"
+            )
+
+    def _signal_candles_received(self, candles: list[Any]) -> None:
+        """Called by WebSocket handler when candles are received."""
+        self._candles_event.set(candles)
+    
+    async def buy_optimized(
+        self,
+        asset: str,
+        amount: float,
+        direction: str,
+        duration: int,
+            timeout: float | None = None
+    ) -> dict[str, Any]:
+        """.. deprecated:: 1.2 — use :meth:`Quotex.buy` directly.
+
+        Delegates to the real buy path, which is itself event-driven via
+        :class:`~pyquotex._api._waits.SlotRegistry`.
+        """
+        _deprecated("Quotex.buy()")
+        ok, data = await self.buy(  # type: ignore[attr-defined]
+            amount, asset, direction, duration
+        )
+        return {"success": ok, "data": data}
+
+    def _signal_buy_result(self, result: dict[str, Any]) -> None:
+        """.. deprecated:: 1.2 — buy results are now fired via SlotRegistry."""
+        self._buy_result_event.set(result)
+
+    async def sell_option_optimized(
+        self,
+            options_ids: list[Any],
+        timeout: float = 30.0
+    ) -> dict[str, Any]:
+        """.. deprecated:: 1.2 — use :meth:`Quotex.sell_option` directly.
+
+        Delegates to the real sell path which now uses ``wait_until`` with
+        a hard timeout (see :func:`pyquotex._api._waits.wait_until`).
+        """
+        _deprecated("Quotex.sell_option()")
+        return await self.sell_option(  # type: ignore[attr-defined]
+            options_ids, timeout=int(timeout)
+        )
+
+    def _signal_sell_result(self, result: dict[str, Any]) -> None:
+        """.. deprecated:: 1.2 — sell results are now fired via SlotRegistry."""
+        self._sell_result_event.set(result)
+
+
+async def optimized_wait_for_data(
+    get_data: Callable[[], Any],
+    condition: Callable[[Any], bool],
+    timeout: float = 30.0,
+    check_interval: float = 0.1,
+    error_message: str = "Data timeout"
+) -> Any:
+    """Generic optimized wait for data with condition.
+    
+    More efficient than raw polling loops.
+    Can be used as a replacement for common polling patterns.
+    
+    Args:
+        get_data: Callable that returns current data
+        condition: Callable that checks if data is valid
+        timeout: Maximum wait time in seconds
+        check_interval: Time between checks in seconds
+        error_message: Error message if timeout occurs
+        
+    Returns:
+        The data that satisfied the condition
+        
+    Raises:
+        TimeoutError: If condition not met within timeout
+    """
+    start_time = asyncio.get_event_loop().time()
+    
+    while True:
+        data = get_data()
+        if condition(data):
+            return data
+        
+        elapsed = asyncio.get_event_loop().time() - start_time
+        if elapsed > timeout:
+            raise TimeoutError(error_message)
+        
+        await asyncio.sleep(min(check_interval, timeout - elapsed))
+
+
+async def batch_requests_with_timeout(
+        requests: list[Any],
+    timeout: float = 30.0,
+    return_exceptions: bool = False
+) -> list[Any]:
+    """Execute multiple async requests with shared timeout.
+    
+    Args:
+        requests: List of coroutines to execute
+        timeout: Shared timeout for all requests
+        return_exceptions: If True, return exceptions instead of raising
+        
+    Returns:
+        List of results
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.gather(*requests, return_exceptions=return_exceptions),
+            timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        raise TimeoutError(f"Batch request timeout after {timeout}s")
