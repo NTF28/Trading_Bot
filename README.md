@@ -1,7 +1,7 @@
 <div align="center">
 
 <!-- Replace this with an actual screenshot of your dashboard -->
-![QBOT Dashboard](https://raw.githubusercontent.com/NTF28/Trading_Bot/Screenshot/screenshot.png)
+![QBOT Dashboard](https://raw.githubusercontent.com/NTF28/Trading_Bot/main/screenshot.png)
 
 # ⚡ QBOT — Quotex Signal Engine
 
